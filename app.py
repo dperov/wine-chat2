@@ -1,4 +1,3 @@
-import json
 import os
 import threading
 import time
@@ -6,7 +5,7 @@ import uuid
 from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
-from flask import Flask, jsonify, render_template, request, session
+from flask import Flask, Response, jsonify, render_template, request, session
 
 from assistant import WineAssistant
 from db import WineDB
@@ -159,6 +158,7 @@ def health():
                 "perf_log_enabled": is_perf_log_enabled(),
                 "perf_log_path": str(get_perf_log_path()),
                 "app_debug": APP_DEBUG,
+                "web_tool_enabled": bool(getattr(assistant, "web_tool_enabled", False)),
             }
         )
     except Exception as exc:
@@ -222,6 +222,10 @@ def chat():
         request_ms=elapsed_ms,
         llm_rounds=(perf_meta or {}).get("llm_rounds"),
         selected_model=(perf_meta or {}).get("selected_model"),
+        llm_input_chars_total=(perf_meta or {}).get("llm_input_chars_total"),
+        llm_output_chars_total=(perf_meta or {}).get("llm_output_chars_total"),
+        llm_prompt_tokens_total=(perf_meta or {}).get("llm_prompt_tokens_total"),
+        llm_completion_tokens_total=(perf_meta or {}).get("llm_completion_tokens_total"),
         llm_wait_ms_total=(perf_meta or {}).get("llm_wait_ms_total"),
         db_tool_calls=(perf_meta or {}).get("db_tool_calls"),
         db_query_ms_total=(perf_meta or {}).get("db_query_ms_total"),
@@ -249,20 +253,18 @@ def debug_perf_tail():
     lines = max(1, min(lines, 500))
 
     raw_lines = tail_perf_log(lines=lines)
-    parsed: list[dict] = []
-    for item in raw_lines:
-        try:
-            parsed.append(json.loads(item))
-        except Exception:
-            parsed.append({"raw": item})
+    fmt = str(request.args.get("format", "text")).strip().lower()
+    if fmt != "json":
+        payload = "\n".join(raw_lines) + ("\n" if raw_lines else "")
+        return Response(payload, content_type="text/plain; charset=utf-8")
 
     return jsonify(
         {
             "ok": True,
             "enabled": is_perf_log_enabled(),
             "path": str(get_perf_log_path()),
-            "count": len(parsed),
-            "lines": parsed,
+            "count": len(raw_lines),
+            "lines": raw_lines,
         }
     )
 

@@ -11,6 +11,7 @@
   - только `SELECT`/`WITH`
   - запрет DDL/DML/PRAGMA
   - ограничение выдачи `LIMIT` сверху
+  - `LIKE` выполняется регистронезависимо для кириллицы и латиницы (через внутренний `RU_LIKE`)
 - Сессионная история диалога (по пользователю).
 - UI с санитизацией Markdown (DOMPurify).
 - В prompt передаются схема и справочники из БД.
@@ -42,6 +43,7 @@ WEB_SEARCH_CONTEXT_SIZE=medium
 WEB_SEARCH_COUNTRY=RU
 WEB_SEARCH_CITY=moscow
 WEB_SEARCH_ALLOWED_DOMAINS=
+WINE_WEB_TOOL_ENABLED=0
 WINE_APP_DEBUG=0
 WINE_PERF_LOG_ENABLED=1
 WINE_LOG_DIR=logs
@@ -51,7 +53,8 @@ WINE_PERF_LOG_PATH=
 `WINE_DB_PATH` по умолчанию указывает на `../wine_product.sqlite`.
 `WINE_USER_DB_PATH` по умолчанию указывает на `../wine_social.sqlite`.
 `WINE_APP_DEBUG` по умолчанию `0` (debug-режим Flask выключен).
-`WINE_PERF_LOG_ENABLED` по умолчанию `1` (рабочий perf-лог включен, JSONL).
+`WINE_PERF_LOG_ENABLED` по умолчанию `1` (рабочий perf-лог включен, человекочитаемый текстовый формат).
+`WINE_WEB_TOOL_ENABLED` по умолчанию `0` (web tool отключен).
 По умолчанию ассистент использует быструю модель `gpt-4.1-mini`, а для сложных запросов переключается на `OPENAI_MODEL_COMPLEX` (`gpt-4.1`).
 История для LLM по умолчанию ограничена `8` сообщениями, а `OPENAI_MAX_COMPLETION_TOKENS` по умолчанию `1200`.
 
@@ -65,7 +68,8 @@ python app.py
 ## Health-check
 `GET /health` возвращает состояние подключения к БД и базовую информацию о схеме.
 `GET /capabilities` возвращает краткую сводку возможностей системы (из `SYSTEM_CAPABILITIES.md`).
-`GET /debug/perf/tail?lines=100` возвращает tail performance-лога.
+`GET /debug/perf/tail?lines=100` возвращает tail performance-лога в `text/plain`.
+`GET /debug/perf/tail?lines=100&format=json` возвращает тот же tail в JSON.
 
 ## Публичные записи пользователей
 Добавлена write-база с таблицей `public_records` (лайки/заметки).

@@ -1,9 +1,94 @@
 import json
+import functools
 import re
 import sqlite3
 from pathlib import Path
 
 from sql_guard import build_safe_sql
+
+
+LIKE_EXPR_RE = re.compile(
+    r"""
+    (?P<lhs>
+        LOWER\([^()]*\)
+        |
+        [A-Za-z_][A-Za-z0-9_\.]*
+        |
+        \([^()]+\)
+    )
+    \s+
+    (?P<not>NOT\s+)?
+    LIKE
+    \s+
+    (?P<rhs>
+        '(?:''|[^'])*'
+        |
+        "(?:""|[^"])*"
+        |
+        :[A-Za-z_][A-Za-z0-9_]*
+        |
+        \?
+        |
+        [A-Za-z_][A-Za-z0-9_\.]*
+        |
+        \([^()]*\)
+    )
+    """,
+    flags=re.IGNORECASE | re.VERBOSE,
+)
+
+
+@functools.lru_cache(maxsize=2048)
+def _compile_like_regex(pattern_cf: str, escape_char: str) -> re.Pattern[str]:
+    out: list[str] = ["^"]
+    i = 0
+    while i < len(pattern_cf):
+        ch = pattern_cf[i]
+        if ch == escape_char and i + 1 < len(pattern_cf):
+            i += 1
+            out.append(re.escape(pattern_cf[i]))
+        elif ch == "%":
+            out.append(".*")
+        elif ch == "_":
+            out.append(".")
+        else:
+            out.append(re.escape(ch))
+        i += 1
+    out.append("$")
+    return re.compile("".join(out), flags=re.DOTALL)
+
+
+def _ru_like(value: str | None, pattern: str | None) -> int:
+    if value is None or pattern is None:
+        return 0
+    v = str(value).casefold()
+    p = str(pattern).casefold()
+    rx = _compile_like_regex(p, "\\")
+    return 1 if rx.match(v) else 0
+
+
+def _ru_like_escape(value: str | None, pattern: str | None, escape: str | None) -> int:
+    if value is None or pattern is None:
+        return 0
+    esc = (str(escape or "\\") or "\\")[0]
+    v = str(value).casefold()
+    p = str(pattern).casefold()
+    rx = _compile_like_regex(p, esc)
+    return 1 if rx.match(v) else 0
+
+
+def rewrite_like_to_ru_like(sql: str) -> str:
+    text = str(sql or "")
+
+    def repl(match: re.Match[str]) -> str:
+        lhs = match.group("lhs")
+        rhs = match.group("rhs")
+        is_not = bool(match.group("not"))
+        if is_not:
+            return f"(RU_LIKE({lhs}, {rhs}) = 0)"
+        return f"(RU_LIKE({lhs}, {rhs}) = 1)"
+
+    return LIKE_EXPR_RE.sub(repl, text)
 
 
 class WineDB:
@@ -17,6 +102,8 @@ class WineDB:
         uri = f"file:{self.db_path.as_posix()}?mode=ro"
         conn = sqlite3.connect(uri, uri=True)
         conn.row_factory = sqlite3.Row
+        conn.create_function("RU_LIKE", 2, _ru_like, deterministic=True)
+        conn.create_function("RU_LIKE", 3, _ru_like_escape, deterministic=True)
         return conn
 
     def ping(self) -> bool:
@@ -94,8 +181,9 @@ class WineDB:
         max_rows: int = 200,
     ) -> tuple[str, list[dict]]:
         safe_sql = build_safe_sql(raw_sql, max_rows=max_rows)
+        exec_sql = rewrite_like_to_ru_like(safe_sql)
         with self._connect_ro() as conn:
-            cursor = conn.execute(safe_sql)
+            cursor = conn.execute(exec_sql)
             rows = cursor.fetchall()
 
         result = [dict(row) for row in rows]
@@ -136,11 +224,12 @@ class WineDB:
         for tok in tokens[:8]:
             where_parts.append(
                 """
-                LOWER(
+                RU_LIKE(
                     COALESCE(wine_name, '') || ' ' ||
                     COALESCE(producer, '') || ' ' ||
                     COALESCE(title, '')
-                ) LIKE ?
+                , ?
+                ) = 1
                 """
             )
             params.append(f"%{tok}%")

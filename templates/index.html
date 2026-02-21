@@ -89,19 +89,31 @@
             margin-bottom: 0;
         }
         .wine-inline-link {
-            margin-left: 6px;
-            font-size: 11px;
-            color: #1b4f8a;
+            margin-left: 8px;
+            font-size: 12px;
+            font-weight: 800;
+            color: #b00020;
             text-decoration: none;
-            border: 1px solid #c7d7ea;
+            border: 1px solid #d32f2f;
             border-radius: 999px;
-            padding: 0 5px;
-            background: #f3f8ff;
+            padding: 1px 7px;
+            background: #ffe9ec;
             vertical-align: baseline;
         }
         .wine-inline-link:hover {
-            background: #e9f2ff;
-            border-color: #a9c4e3;
+            background: #ffd7dd;
+            border-color: #b00020;
+            color: #8a0018;
+        }
+        .perf {
+            margin-top: 6px;
+            font-size: 11px;
+            color: #5b6474;
+            background: #f8fafc;
+            border: 1px solid #e7edf5;
+            border-radius: 8px;
+            padding: 6px 8px;
+            line-height: 1.35;
         }
         .sql {
             margin-top: 8px;
@@ -186,20 +198,84 @@
             const candidates = Array.isArray(meta?.wine_context_candidates)
                 ? meta.wine_context_candidates
                 : [];
-            const links = candidates
-                .map((item, idx) => ({ idx: idx + 1, url: String(item?.url || "").trim() }))
+            const normalizeForMatch = (value) =>
+                String(value || "")
+                    .toLowerCase()
+                    .replace(/[ё]/g, "е")
+                    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+                    .replace(/\s+/g, " ")
+                    .trim();
+            const shortWineName = (value) => {
+                const txt = String(value || "").trim();
+                if (!txt) return "";
+                return txt.split(",")[0].trim();
+            };
+
+            const linksRaw = candidates
+                .map((item) => ({
+                    url: String(item?.url || "").trim(),
+                    wineName: String(item?.wine_name || item?.title || "").trim(),
+                    producer: String(item?.producer || "").trim(),
+                }))
                 .filter((x) => x.url);
+
+            const links = [];
+            const seenUrls = new Set();
+            for (const item of linksRaw) {
+                if (seenUrls.has(item.url)) continue;
+                seenUrls.add(item.url);
+                links.push({
+                    ...item,
+                    wineNameNorm: normalizeForMatch(item.wineName),
+                    wineNameShortNorm: normalizeForMatch(shortWineName(item.wineName)),
+                    producerNorm: normalizeForMatch(item.producer),
+                    used: false,
+                });
+            }
 
             let prepared = String(markdownText || "").replace(/\n{3,}/g, "\n\n");
             if (links.length > 0) {
-                let i = 0;
-                prepared = prepared.replace(
-                    /^(\s*\d+\.\s+.+)$/gm,
-                    (line) => {
-                        if (i >= links.length) return line;
-                        const url = links[i].url;
-                        i += 1;
-                        return `${line} [url](${url})`;
+                let nextUnused = 0;
+
+                const pickLinkForLine = (line) => {
+                    const lineNoLinks = String(line || "").replace(/\[[^\]]+\]\([^)]+\)/g, " ");
+                    const lineNorm = normalizeForMatch(lineNoLinks);
+                    if (!lineNorm) return null;
+
+                    let match = links.find(
+                        (x) =>
+                            !x.used &&
+                            (
+                                (x.wineNameNorm && (lineNorm.includes(x.wineNameNorm) || x.wineNameNorm.includes(lineNorm))) ||
+                                (x.wineNameShortNorm && (lineNorm.includes(x.wineNameShortNorm) || x.wineNameShortNorm.includes(lineNorm)))
+                            )
+                    );
+                    if (!match) {
+                        match = links.find(
+                            (x) => !x.used && x.producerNorm && lineNorm.includes(x.producerNorm)
+                        );
+                    }
+                    if (!match) {
+                        while (nextUnused < links.length && links[nextUnused].used) nextUnused += 1;
+                        if (nextUnused >= links.length) return null;
+                        match = links[nextUnused];
+                    }
+                    match.used = true;
+                    return match;
+                };
+
+                prepared = prepared.replace(/^([^\n]+?)\s*🔗\s*$/gm, (fullLine, baseLine) => {
+                    if (/\[[^\]]+\]\([^)]+\)/.test(fullLine)) return fullLine;
+                    const picked = pickLinkForLine(baseLine);
+                    if (!picked) return fullLine;
+                    return `${baseLine} [🔗](${picked.url})`;
+                });
+
+                prepared = prepared.replace(/^(\s*\d+\.\s+.+)$/gm, (line) => {
+                    if (/\[[^\]]+\]\([^)]+\)/.test(line)) return line;
+                    const picked = pickLinkForLine(line);
+                    if (!picked) return line;
+                    return `${line} [🔗](${picked.url})`;
                     }
                 );
             }
@@ -209,7 +285,8 @@
 
             const inlineLinks = wrap.querySelectorAll("a");
             inlineLinks.forEach((a) => {
-                if ((a.textContent || "").trim().toLowerCase() === "url") {
+                const text = (a.textContent || "").trim().toLowerCase();
+                if (text === "url" || text === "🔗") {
                     a.classList.add("wine-inline-link");
                     a.target = "_blank";
                     a.rel = "noopener noreferrer";
@@ -226,7 +303,7 @@
                     a.href = links[0].url;
                     a.target = "_blank";
                     a.rel = "noopener noreferrer";
-                    a.textContent = "url";
+                    a.textContent = "🔗";
                     firstP.appendChild(a);
                 }
             }
@@ -236,6 +313,25 @@
                 sql.className = "sql";
                 sql.textContent = `SQL: ${meta.sql}\nrows: ${meta.rows ?? 0}`;
                 wrap.appendChild(sql);
+            }
+            const perf = meta?.perf || null;
+            if (perf) {
+                const perfEl = document.createElement("div");
+                perfEl.className = "perf";
+                const inChars = Number(perf.llm_input_chars_total || 0);
+                const outChars = Number(perf.llm_output_chars_total || 0);
+                const calls = Number(perf.llm_rounds || 0);
+                const waitMs = Number(perf.llm_wait_ms_total || 0);
+                const totalMs = Number(perf.total_ms || 0);
+                const inTok = Number(perf.llm_prompt_tokens_total || 0);
+                const outTok = Number(perf.llm_completion_tokens_total || 0);
+                const model = String(perf.selected_model || meta?.model || "-");
+
+                const inSize = inTok > 0 ? `${inTok} tok / ${inChars} ch` : `${inChars} ch`;
+                const outSize = outTok > 0 ? `${outTok} tok / ${outChars} ch` : `${outChars} ch`;
+                perfEl.textContent =
+                    `LLM ${model} | in: ${inSize} | out: ${outSize} | req: ${calls} | wait: ${waitMs.toFixed(0)} ms | total: ${totalMs.toFixed(0)} ms`;
+                wrap.appendChild(perfEl);
             }
             chat.appendChild(wrap);
             chat.scrollTop = chat.scrollHeight;

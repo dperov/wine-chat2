@@ -21,6 +21,13 @@ load_dotenv(find_dotenv())
 
 
 class WineAssistant:
+    @staticmethod
+    def _env_bool(name: str, default: bool = False) -> bool:
+        raw = str(os.getenv(name, "")).strip().lower()
+        if not raw:
+            return default
+        return raw in {"1", "true", "yes", "on"}
+
     def __init__(
         self,
         db: WineDB,
@@ -51,6 +58,7 @@ class WineAssistant:
         self.max_completion_tokens = max_completion_tokens or int(
             os.getenv("OPENAI_MAX_COMPLETION_TOKENS", "1200")
         )
+        self.web_tool_enabled = self._env_bool("WINE_WEB_TOOL_ENABLED", default=False)
         self.capabilities_text = self._load_capabilities_text(capabilities_path)
 
         api_key = os.getenv("OPENAI_API_KEY")
@@ -75,31 +83,34 @@ class WineAssistant:
                     },
                 },
             },
-            {
-                "type": "function",
-                "function": {
-                    "name": "search_web",
-                    "description": (
-                        "Ищет информацию в интернете по винной теме: наличие в продаже, цены, магазины,"
-                        " обзоры, новости."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "Поисковый запрос",
-                            },
-                            "max_results": {
-                                "type": "integer",
-                                "description": "Максимум результатов (1..10)",
-                            },
-                        },
-                        "required": ["query"],
-                    },
-                },
-            },
         ]
+        if self.web_tool_enabled:
+            self.tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search_web",
+                        "description": (
+                            "Ищет информацию в интернете по винной теме: наличие в продаже, цены, магазины,"
+                            " обзоры, новости."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Поисковый запрос",
+                                },
+                                "max_results": {
+                                    "type": "integer",
+                                    "description": "Максимум результатов (1..10)",
+                                },
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                }
+            )
 
         if self.records_db is not None:
             self.tools.extend(
@@ -204,6 +215,18 @@ class WineAssistant:
                 return f"{name}: []"
             return f"{name}: " + ", ".join(values)
 
+        web_rules = (
+            "8) Если пользователь спрашивает о наличии в продаже, цене на полке, магазинах или другой "
+            "внешней информации, используй search_web.\n"
+            "9) В ответе пользователю запрещено указывать URL, названия сайтов и любые веб-источники.\n"
+            "10) Для цены и наличия указывай, что это рыночные данные, "
+            "которые могут отличаться по регионам/магазинам.\n"
+            "11) Если в локальной базе данных не найдено совпадений по названию вина, "
+            "используй search_web, чтобы дать практичный ответ без ссылок.\n"
+            if self.web_tool_enabled
+            else "8) Web-поиск отключен. Отвечай только на данных локальной базы.\n"
+        )
+
         return (
             "Ты винный ассистент. Поддерживай разговор на темы вина.\n\n"
             f"{schema}\n\n"
@@ -223,13 +246,7 @@ class WineAssistant:
             "6) Если пользователь просит топ/список, сортируй явно и ограничивай выдачу.\n"
             "7) Если пользователь просит полный список (полностью/весь список/без сокращений), "
             "нельзя сокращать ответ и писать '... и еще N'.\n"
-            "8) Если пользователь спрашивает о наличии в продаже, цене на полке, магазинах или другой "
-            "внешней информации, используй search_web.\n"
-            "9) В ответе пользователю запрещено указывать URL, названия сайтов и любые веб-источники.\n"
-            "10) Для цены и наличия указывай, что это рыночные данные, "
-            "которые могут отличаться по регионам/магазинам.\n"
-            "11) Если в локальной базе данных не найдено совпадений по названию вина, "
-            "используй search_web, чтобы дать практичный ответ без ссылок.\n"
+            f"{web_rules}"
             "12) Если пользователь просит поставить лайк/добавить заметку/показать заметки и лайки, "
             "используй инструменты публичных записей.\n"
             "13) Если пользователь спрашивает о возможностях системы, выдай краткую сводку.\n"
@@ -1406,6 +1423,10 @@ class WineAssistant:
             "selected_model": selected_model,
             "llm_rounds": 0,
             "llm_wait_ms_total": 0.0,
+            "llm_input_chars_total": 0,
+            "llm_output_chars_total": 0,
+            "llm_prompt_tokens_total": 0,
+            "llm_completion_tokens_total": 0,
             "tool_calls_total": 0,
             "db_tool_calls": 0,
             "db_query_ms_total": 0.0,
@@ -1485,7 +1506,31 @@ class WineAssistant:
         public_record_ops: list[dict[str, Any]] = []
         latest_wine_candidates: list[dict[str, Any]] = []
 
+        def _messages_char_size(items: list[dict[str, Any]]) -> int:
+            total = 0
+            for msg in items:
+                if isinstance(msg, dict):
+                    content = msg.get("content")
+                    tool_calls = msg.get("tool_calls")
+                else:
+                    content = getattr(msg, "content", None)
+                    tool_calls = getattr(msg, "tool_calls", None)
+                if isinstance(content, str):
+                    total += len(content)
+                elif content is not None:
+                    try:
+                        total += len(json.dumps(content, ensure_ascii=False))
+                    except Exception:
+                        total += len(str(content))
+                if isinstance(tool_calls, list):
+                    try:
+                        total += len(json.dumps(tool_calls, ensure_ascii=False))
+                    except Exception:
+                        total += len(str(tool_calls))
+            return total
+
         for _ in range(3):
+            perf["llm_input_chars_total"] += _messages_char_size(messages)
             llm_t0 = time.perf_counter()
             completion = self.client.chat.completions.create(
                 model=selected_model,
@@ -1497,10 +1542,22 @@ class WineAssistant:
             perf["llm_rounds"] += 1
             perf["llm_wait_ms_total"] += (time.perf_counter() - llm_t0) * 1000
             msg = completion.choices[0].message
+            usage = getattr(completion, "usage", None)
+            if usage is not None:
+                perf["llm_prompt_tokens_total"] += int(getattr(usage, "prompt_tokens", 0) or 0)
+                perf["llm_completion_tokens_total"] += int(
+                    getattr(usage, "completion_tokens", 0) or 0
+                )
+            output_chars = len(str(msg.content or ""))
+            if msg.tool_calls:
+                for tc in msg.tool_calls:
+                    output_chars += len(str(tc.function.name or ""))
+                    output_chars += len(str(tc.function.arguments or ""))
+            perf["llm_output_chars_total"] += output_chars
 
             if not msg.tool_calls:
                 answer = msg.content or "Не удалось сформировать ответ."
-                if not web_results and (
+                if self.web_tool_enabled and not web_results and (
                     self._is_price_or_availability_request(user_text)
                     or (last_rows == 0 and self._looks_like_wine_name_or_topic(user_text))
                 ):

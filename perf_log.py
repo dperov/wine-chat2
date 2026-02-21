@@ -1,4 +1,3 @@
-import json
 import os
 import threading
 from datetime import datetime, timezone
@@ -32,25 +31,70 @@ def get_perf_log_path() -> Path:
     return _DEFAULT_LOG_PATH
 
 
-def _safe_json(data: dict[str, Any]) -> str:
-    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+def _format_value(value: Any) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    text = str(value).strip()
+    text = " ".join(text.split())
+    if not text:
+        return "-"
+    if any(ch.isspace() for ch in text):
+        return f'"{text}"'
+    return text
+
+
+def _format_human_line(ts: str, event: str, fields: dict[str, Any]) -> str:
+    priority = [
+        "status",
+        "method",
+        "path",
+        "public_user",
+        "user_source",
+        "selected_model",
+        "request_ms",
+        "total_ms",
+        "llm_rounds",
+        "llm_wait_ms_total",
+        "db_tool_calls",
+        "db_query_ms_total",
+        "web_tool_calls",
+        "web_query_ms_total",
+        "fallback_web_calls",
+        "fallback_web_ms_total",
+        "rows",
+        "sql_count",
+        "web_count",
+        "sid",
+    ]
+    parts: list[str] = [f"{ts}", f"event={event}"]
+    seen: set[str] = set()
+    for key in priority:
+        if key in fields:
+            parts.append(f"{key}={_format_value(fields[key])}")
+            seen.add(key)
+    for key in sorted(k for k in fields.keys() if k not in seen):
+        parts.append(f"{key}={_format_value(fields[key])}")
+    return " | ".join(parts)
 
 
 def append_perf_log(event: str, **fields: Any) -> bool:
     if not is_perf_log_enabled():
         return False
 
-    entry = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "event": str(event or "").strip() or "event",
-    }
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    event_name = str(event or "").strip() or "event"
+    normalized_fields: dict[str, Any] = {}
     for key, value in fields.items():
-        entry[str(key)] = value
+        normalized_fields[str(key)] = value
 
     path = get_perf_log_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        line = _safe_json(entry) + "\n"
+        line = _format_human_line(ts=ts, event=event_name, fields=normalized_fields) + "\n"
         with _LOCK:
             with path.open("a", encoding="utf-8") as f:
                 f.write(line)
