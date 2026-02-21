@@ -4,6 +4,7 @@ exports/*
 logs/*
 *.pyc
 .env
+.password
 database.db
 *.exe
 *.db

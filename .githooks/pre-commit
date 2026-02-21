@@ -1,0 +1,12 @@
+#!/bin/sh
+# Шифрует .env -> .env.enc перед коммитом, если оба файла и пароль есть
+DIR="$(dirname "$0")"
+PLAINTEXT=".env"
+CIPHER=".env.enc"
+PASS=".password"
+
+if [ -f "$PLAINTEXT" ] && [ -f "$PASS" ]; then
+    "$DIR/cryptor.sh" encrypt "$PLAINTEXT" "$CIPHER" "$PASS" || exit 1
+    git add "$CIPHER"
+    git reset "$PLAINTEXT" 2>/dev/null
+fi

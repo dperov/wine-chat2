@@ -1,0 +1,10 @@
+#!/bin/sh
+# Расшифровывает .env.enc -> .env после checkout
+DIR="$(dirname "$0")"
+PLAINTEXT=".env"
+CIPHER=".env.enc"
+PASS=".password"
+
+if [ -f "$CIPHER" ] && [ -f "$PASS" ]; then
+    "$DIR/cryptor.sh" decrypt "$CIPHER" "$PLAINTEXT" "$PASS"
+fi
