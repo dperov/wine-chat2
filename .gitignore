@@ -1,0 +1,10 @@
+﻿env/
+__pycache__/
+exports/*
+*.pyc
+.env
+database.db
+*.exe
+*.db
+*.png
+*.jpg
