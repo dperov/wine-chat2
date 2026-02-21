@@ -26,8 +26,12 @@ pip install -r requirements.txt
 ## Настройка `.env`
 ```properties
 OPENAI_API_KEY=your_key
-OPENAI_MODEL=gpt-4.1-mini
+OPENAI_MODEL_FAST=gpt-4.1-mini
+OPENAI_MODEL_COMPLEX=gpt-4.1
+OPENAI_MODEL=
 OPENAI_WEB_MODEL=gpt-4.1
+OPENAI_MAX_HISTORY_MESSAGES=8
+OPENAI_MAX_COMPLETION_TOKENS=1200
 WINE_DB_PATH=..\wine_product.sqlite
 WINE_TABLE=wine_cards_wide
 WINE_USER_DB_PATH=..\wine_social.sqlite
@@ -38,10 +42,18 @@ WEB_SEARCH_CONTEXT_SIZE=medium
 WEB_SEARCH_COUNTRY=RU
 WEB_SEARCH_CITY=moscow
 WEB_SEARCH_ALLOWED_DOMAINS=
+WINE_APP_DEBUG=0
+WINE_PERF_LOG_ENABLED=1
+WINE_LOG_DIR=logs
+WINE_PERF_LOG_PATH=
 ```
 
 `WINE_DB_PATH` по умолчанию указывает на `../wine_product.sqlite`.
 `WINE_USER_DB_PATH` по умолчанию указывает на `../wine_social.sqlite`.
+`WINE_APP_DEBUG` по умолчанию `0` (debug-режим Flask выключен).
+`WINE_PERF_LOG_ENABLED` по умолчанию `1` (рабочий perf-лог включен, JSONL).
+По умолчанию ассистент использует быструю модель `gpt-4.1-mini`, а для сложных запросов переключается на `OPENAI_MODEL_COMPLEX` (`gpt-4.1`).
+История для LLM по умолчанию ограничена `8` сообщениями, а `OPENAI_MAX_COMPLETION_TOKENS` по умолчанию `1200`.
 
 ## Запуск
 ```powershell
@@ -53,6 +65,7 @@ python app.py
 ## Health-check
 `GET /health` возвращает состояние подключения к БД и базовую информацию о схеме.
 `GET /capabilities` возвращает краткую сводку возможностей системы (из `SYSTEM_CAPABILITIES.md`).
+`GET /debug/perf/tail?lines=100` возвращает tail performance-лога.
 
 ## Публичные записи пользователей
 Добавлена write-база с таблицей `public_records` (лайки/заметки).

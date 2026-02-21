@@ -1,5 +1,7 @@
+import json
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -8,6 +10,7 @@ from flask import Flask, jsonify, render_template, request, session
 
 from assistant import WineAssistant
 from db import WineDB
+from perf_log import append_perf_log, get_perf_log_path, is_perf_log_enabled, tail_perf_log
 from public_records_db import PublicRecordError, PublicRecordsDB
 
 load_dotenv(find_dotenv())
@@ -23,8 +26,10 @@ CAPABILITIES_FILE = BASE_DIR / "SYSTEM_CAPABILITIES.md"
 WELCOME_MESSAGE = (
     "В базе собраны карточки российских вин: название, производитель, регион, "
     "урожай, рейтинг, характеристики и гастрономические рекомендации. "
-    "Задайте любой запрос по этим данным."
+    "Задайте любой запрос по этим данным. "
+    "Если хотите, в начале диалога представьтесь по имени, и я буду обращаться к вам по имени."
 )
+APP_DEBUG = str(os.getenv("WINE_APP_DEBUG", "0")).strip().lower() in {"1", "true", "yes", "on"}
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "wine-chat2-dev-secret")
@@ -151,6 +156,9 @@ def health():
                 "columns": len(cols),
                 "records_db": str(USER_DB_PATH),
                 "external_user_id_header": EXTERNAL_USER_ID_HEADER,
+                "perf_log_enabled": is_perf_log_enabled(),
+                "perf_log_path": str(get_perf_log_path()),
+                "app_debug": APP_DEBUG,
             }
         )
     except Exception as exc:
@@ -168,6 +176,7 @@ def capabilities():
 
 @app.route("/chat", methods=["POST"])
 def chat():
+    request_t0 = time.perf_counter()
     payload = request.get_json(silent=True) or {}
     message = str(payload.get("message", "")).strip()
     if not message:
@@ -198,8 +207,64 @@ def chat():
         answer = f"Ошибка обработки запроса: {exc}"
         meta = {"sql": None, "rows": 0, "model": assistant.model}
 
+    elapsed_ms = round((time.perf_counter() - request_t0) * 1000, 2)
+    perf_meta = meta.get("perf") if isinstance(meta, dict) else None
+    append_perf_log(
+        "chat_request",
+        sid=sid[:10],
+        method=request.method,
+        path=request.path,
+        status="ok" if not str(answer).startswith("Ошибка обработки запроса:") else "error",
+        user_source=user_source,
+        public_user=public_user,
+        message_len=len(message),
+        response_len=len(str(answer or "")),
+        request_ms=elapsed_ms,
+        llm_rounds=(perf_meta or {}).get("llm_rounds"),
+        selected_model=(perf_meta or {}).get("selected_model"),
+        llm_wait_ms_total=(perf_meta or {}).get("llm_wait_ms_total"),
+        db_tool_calls=(perf_meta or {}).get("db_tool_calls"),
+        db_query_ms_total=(perf_meta or {}).get("db_query_ms_total"),
+        web_tool_calls=(perf_meta or {}).get("web_tool_calls"),
+        web_query_ms_total=(perf_meta or {}).get("web_query_ms_total"),
+        fallback_web_calls=(perf_meta or {}).get("fallback_web_calls"),
+        fallback_web_ms_total=(perf_meta or {}).get("fallback_web_ms_total"),
+        total_ms=(perf_meta or {}).get("total_ms"),
+        rows=(meta or {}).get("rows") if isinstance(meta, dict) else None,
+        sql_count=len((meta or {}).get("sql_queries") or []) if isinstance(meta, dict) else 0,
+        web_count=len((meta or {}).get("web_queries") or []) if isinstance(meta, dict) else 0,
+    )
+
     _append_history(sid, "assistant", answer)
     return jsonify({"response": answer, "meta": meta})
+
+
+@app.route("/debug/perf/tail", methods=["GET"])
+def debug_perf_tail():
+    lines_raw = str(request.args.get("lines", "100")).strip()
+    try:
+        lines = int(lines_raw)
+    except Exception:
+        lines = 100
+    lines = max(1, min(lines, 500))
+
+    raw_lines = tail_perf_log(lines=lines)
+    parsed: list[dict] = []
+    for item in raw_lines:
+        try:
+            parsed.append(json.loads(item))
+        except Exception:
+            parsed.append({"raw": item})
+
+    return jsonify(
+        {
+            "ok": True,
+            "enabled": is_perf_log_enabled(),
+            "path": str(get_perf_log_path()),
+            "count": len(parsed),
+            "lines": parsed,
+        }
+    )
 
 
 @app.route("/api/records", methods=["POST"])
@@ -267,4 +332,4 @@ def list_public_records_by_wine(wine_id: str):
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port, debug=APP_DEBUG)

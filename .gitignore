@@ -1,6 +1,7 @@
 ﻿env/
 __pycache__/
 exports/*
+logs/*
 *.pyc
 .env
 database.db

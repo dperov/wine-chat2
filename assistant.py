@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -26,19 +27,29 @@ class WineAssistant:
         records_db: PublicRecordsDB | None = None,
         capabilities_path: str | Path | None = None,
         model: str | None = None,
-        max_history_messages: int = 12,
+        max_history_messages: int | None = None,
         max_sql_rows: int = 200,
         max_rows_to_model: int = 80,
         max_completion_tokens: int | None = None,
     ):
         self.db = db
         self.records_db = records_db
-        self.model = model or os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-        self.max_history_messages = max_history_messages
+        self.model_fast = (
+            model
+            or os.getenv("OPENAI_MODEL_FAST")
+            or os.getenv("OPENAI_MODEL")
+            or "gpt-4.1-mini"
+        )
+        self.model_complex = os.getenv("OPENAI_MODEL_COMPLEX", "gpt-4.1")
+        self.model = self.model_fast
+        if max_history_messages is None:
+            self.max_history_messages = int(os.getenv("OPENAI_MAX_HISTORY_MESSAGES", "8"))
+        else:
+            self.max_history_messages = int(max_history_messages)
         self.max_sql_rows = max_sql_rows
         self.max_rows_to_model = max_rows_to_model
         self.max_completion_tokens = max_completion_tokens or int(
-            os.getenv("OPENAI_MAX_COMPLETION_TOKENS", "4096")
+            os.getenv("OPENAI_MAX_COMPLETION_TOKENS", "1200")
         )
         self.capabilities_text = self._load_capabilities_text(capabilities_path)
 
@@ -268,6 +279,48 @@ class WineAssistant:
         )
         normalized = [unicodedata.normalize("NFKC", m).replace("ё", "е") for m in markers]
         return any(m in q for m in normalized)
+
+    @staticmethod
+    def _is_complex_query(text: str) -> bool:
+        q = WineAssistant._normalize_text(text)
+        if not q:
+            return False
+        if len(q) >= 180:
+            return True
+
+        complex_markers = (
+            "сравни",
+            "сравнение",
+            "проанализ",
+            "обоснуй",
+            "почему",
+            "подробно",
+            "сценар",
+            "стратег",
+            "подбери",
+            "рекоменд",
+            "пошагов",
+            "разлож",
+            "критер",
+            "несколько вариантов",
+        )
+        if any(m in q for m in complex_markers):
+            return True
+
+        separators = q.count(" и ") + q.count(" или ") + q.count(",")
+        if separators >= 4:
+            return True
+
+        if q.count("?") >= 2:
+            return True
+        return False
+
+    def _select_model_for_query(self, user_text: str) -> str:
+        if self.model_complex == self.model_fast:
+            return self.model_fast
+        if self._is_complex_query(user_text):
+            return self.model_complex
+        return self.model_fast
 
     @staticmethod
     def _pretty_key(name: str) -> str:
@@ -685,6 +738,22 @@ class WineAssistant:
             return "like"
         return None
 
+    @staticmethod
+    def _is_explicit_record_action(text: str) -> bool:
+        q = WineAssistant._normalize_text(text)
+        action_verbs = (
+            "постав",
+            "добав",
+            "сдела",
+            "созда",
+            "сохрани",
+            "запиши",
+            "отметь",
+            "лайкни",
+        )
+        record_words = ("лайк", "заметк", "отметк")
+        return any(v in q for v in action_verbs) and any(w in q for w in record_words)
+
     def _extract_note_content(self, text: str) -> str | None:
         raw = str(text or "").strip()
         if ":" in raw:
@@ -949,6 +1018,8 @@ class WineAssistant:
         intent = self._extract_record_intent(user_text)
         if not intent and not pending:
             return None
+        if intent and not pending and not self._is_explicit_record_action(user_text):
+            return None
 
         record_type = intent or str(pending.get("record_type") or "").strip()
         if record_type not in {"like", "note"}:
@@ -1202,6 +1273,7 @@ class WineAssistant:
         if not raw_query:
             return {"ok": False, "error": "Пустой SQL query."}
 
+        t0 = time.perf_counter()
         try:
             safe_sql, rows = self.db.execute_safe_query(raw_query, max_rows=self.max_sql_rows)
             limited_rows = rows[: self.max_rows_to_model]
@@ -1211,14 +1283,23 @@ class WineAssistant:
                 "row_count": len(rows),
                 "rows": limited_rows,
                 "truncated_for_model": len(rows) > len(limited_rows),
+                "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
             }
             if include_full_rows:
                 result["rows_full"] = rows
             return result
         except SQLValidationError as exc:
-            return {"ok": False, "error": f"SQL отклонен: {exc}"}
+            return {
+                "ok": False,
+                "error": f"SQL отклонен: {exc}",
+                "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
+            }
         except Exception as exc:
-            return {"ok": False, "error": f"Ошибка выполнения SQL: {exc}"}
+            return {
+                "ok": False,
+                "error": f"Ошибка выполнения SQL: {exc}",
+                "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
+            }
 
     def _tool_web_response(self, tool_call_args: str) -> dict[str, Any]:
         try:
@@ -1228,7 +1309,12 @@ class WineAssistant:
 
         query = str(args.get("query", "")).strip()
         max_results = int(args.get("max_results", 5) or 5)
-        return search_wine_web(query=query, max_results=max_results)
+        t0 = time.perf_counter()
+        result = search_wine_web(query=query, max_results=max_results)
+        if isinstance(result, dict):
+            result = dict(result)
+            result["elapsed_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+        return result
 
     def _tool_public_add_response(
         self,
@@ -1314,19 +1400,46 @@ class WineAssistant:
         public_user: str | None = None,
         record_context: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
+        started_at = time.perf_counter()
+        selected_model = self._select_model_for_query(user_text)
+        perf = {
+            "selected_model": selected_model,
+            "llm_rounds": 0,
+            "llm_wait_ms_total": 0.0,
+            "tool_calls_total": 0,
+            "db_tool_calls": 0,
+            "db_query_ms_total": 0.0,
+            "web_tool_calls": 0,
+            "web_query_ms_total": 0.0,
+            "fallback_web_calls": 0,
+            "fallback_web_ms_total": 0.0,
+        }
+
+        def attach_perf(meta: dict[str, Any]) -> dict[str, Any]:
+            out = dict(meta or {})
+            perf_total = dict(perf)
+            perf_total["total_ms"] = round((time.perf_counter() - started_at) * 1000, 2)
+            if perf_total["llm_rounds"] > 0:
+                perf_total["llm_wait_ms_avg"] = round(
+                    perf_total["llm_wait_ms_total"] / perf_total["llm_rounds"],
+                    2,
+                )
+            out["perf"] = perf_total
+            return out
+
         if self._is_capabilities_request(user_text):
             return (
                 self.capabilities_text,
-                {
+                attach_perf({
                     "sql": None,
                     "sql_queries": [],
                     "web_queries": [],
                     "web_results": [],
                     "web_tool_logs": [],
                     "rows": 0,
-                    "model": self.model,
+                    "model": selected_model,
                     "info_source": "SYSTEM_CAPABILITIES.md",
-                },
+                }),
             )
 
         contextual_record = self._handle_contextual_record_intent(
@@ -1336,7 +1449,7 @@ class WineAssistant:
         )
         if contextual_record is not None:
             answer, meta = contextual_record
-            return self._sanitize_public_answer(answer), meta
+            return self._sanitize_public_answer(answer), attach_perf(meta)
 
         my_records = self._handle_my_records_request(
             user_text=user_text,
@@ -1344,12 +1457,12 @@ class WineAssistant:
         )
         if my_records is not None:
             answer, meta = my_records
-            return self._sanitize_public_answer(answer), meta
+            return self._sanitize_public_answer(answer), attach_perf(meta)
 
         if not self.client:
             return (
                 "OpenAI недоступен: проверьте установку пакета `openai` и переменную OPENAI_API_KEY.",
-                {
+                attach_perf({
                     "sql": None,
                     "sql_queries": [],
                     "web_queries": [],
@@ -1357,8 +1470,8 @@ class WineAssistant:
                     "web_tool_logs": [],
                     "public_record_ops": [],
                     "rows": 0,
-                    "model": None,
-                },
+                    "model": selected_model,
+                }),
             )
 
         messages = self._build_messages(user_text, history or [])
@@ -1373,13 +1486,16 @@ class WineAssistant:
         latest_wine_candidates: list[dict[str, Any]] = []
 
         for _ in range(3):
+            llm_t0 = time.perf_counter()
             completion = self.client.chat.completions.create(
-                model=self.model,
+                model=selected_model,
                 messages=messages,
                 tools=self.tools,
                 temperature=0,
                 max_completion_tokens=self.max_completion_tokens,
             )
+            perf["llm_rounds"] += 1
+            perf["llm_wait_ms_total"] += (time.perf_counter() - llm_t0) * 1000
             msg = completion.choices[0].message
 
             if not msg.tool_calls:
@@ -1388,7 +1504,10 @@ class WineAssistant:
                     self._is_price_or_availability_request(user_text)
                     or (last_rows == 0 and self._looks_like_wine_name_or_topic(user_text))
                 ):
+                    fallback_t0 = time.perf_counter()
                     fallback = search_wine_web(query=user_text, max_results=5)
+                    perf["fallback_web_calls"] += 1
+                    perf["fallback_web_ms_total"] += (time.perf_counter() - fallback_t0) * 1000
                     fallback_results = fallback.get("results") or []
                     fallback_log = {
                         "source": "fallback",
@@ -1417,7 +1536,7 @@ class WineAssistant:
                             web_results.extend([x for x in fallback_results if isinstance(x, dict)])
 
                 answer = self._sanitize_public_answer(answer)
-                return answer, {
+                return answer, attach_perf({
                     "sql": last_sql,
                     "sql_queries": sql_queries,
                     "web_queries": web_queries,
@@ -1426,16 +1545,19 @@ class WineAssistant:
                     "public_record_ops": public_record_ops,
                     "wine_context_candidates": latest_wine_candidates,
                     "rows": last_rows,
-                    "model": self.model,
-                }
+                    "model": selected_model,
+                })
 
             messages.append(msg)
             for tool_call in msg.tool_calls:
+                perf["tool_calls_total"] += 1
                 if tool_call.function.name == "execute_sql":
                     tool_result = self._tool_response(
                         tool_call.function.arguments,
                         include_full_rows=force_full,
                     )
+                    perf["db_tool_calls"] += 1
+                    perf["db_query_ms_total"] += float(tool_result.get("elapsed_ms") or 0.0)
                     if tool_result.get("ok"):
                         last_sql = tool_result.get("safe_sql")
                         last_rows = int(tool_result.get("row_count", 0))
@@ -1452,7 +1574,7 @@ class WineAssistant:
                             rows_full = tool_result.get("rows_full", [])
                             answer = self._format_full_list_answer(rows_full)
                             answer = self._sanitize_public_answer(answer)
-                            return answer, {
+                            return answer, attach_perf({
                                 "sql": last_sql,
                                 "sql_queries": sql_queries,
                                 "web_queries": web_queries,
@@ -1461,10 +1583,12 @@ class WineAssistant:
                                 "public_record_ops": public_record_ops,
                                 "wine_context_candidates": latest_wine_candidates,
                                 "rows": last_rows,
-                                "model": self.model,
-                            }
+                                "model": selected_model,
+                            })
                 elif tool_call.function.name == "search_web":
                     tool_result = self._tool_web_response(tool_call.function.arguments)
+                    perf["web_tool_calls"] += 1
+                    perf["web_query_ms_total"] += float(tool_result.get("elapsed_ms") or 0.0)
                     q = None
                     tool_results = tool_result.get("results") or []
                     web_tool_logs.append(
@@ -1538,7 +1662,7 @@ class WineAssistant:
 
         return (
             "Не удалось завершить обработку запроса за допустимое число шагов.",
-            {
+            attach_perf({
                 "sql": last_sql,
                 "sql_queries": sql_queries,
                 "web_queries": web_queries,
@@ -1547,6 +1671,6 @@ class WineAssistant:
                 "public_record_ops": public_record_ops,
                 "wine_context_candidates": latest_wine_candidates,
                 "rows": last_rows,
-                "model": self.model,
-            },
+                "model": selected_model,
+            }),
         )
